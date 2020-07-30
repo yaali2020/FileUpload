@@ -1,0 +1,437 @@
+public class BCSaleOrderSyncHandler {
+    public void fetchAllOrder(){
+        
+    }
+    
+    
+    public list<Object> fetchBCOrder(integer recordlimit, integer pagenumber)
+    {   
+        System.debug('Fetching order data for pagenumber ' + pagenumber);
+        map<string,string> metamap=BCStoreUtil.getStoreAPICredentials();
+        string clientid=metamap.get('clientid');
+        string accesstoken=metamap.get('clienttoken');
+        string bcgroupurl=metamap.get('bcurl');
+        bcgroupurl=bcgroupurl+'/v2/orders?limit='+recordlimit+'&page='+pagenumber;
+        string action='GET';
+        HttpRequest reqData = new HttpRequest();
+        Http http = new Http();
+        reqData.setHeader('X-Auth-Client', clientid);
+        reqData.setHeader('X-Auth-Token', accesstoken);
+        reqData.setHeader('Accept', 'application/json');
+        reqData.setHeader('Content-Type', 'application/json');
+        reqData.setHeader('Connection','keep-alive');
+        reqData.setTimeout(20000); 
+        reqData.setEndpoint(bcgroupurl);                                      
+        reqData.setMethod(action);        
+        String responseFromNet;  
+        HTTPResponse res = http.send(reqData);
+        responseFromNet = res.getBody();
+        System.debug('Response from Bigcommerce for Order ' + responseFromNet);
+        if(res.getStatusCode() != 200)
+        {
+            System.debug('Unable to fetch Order data from Bigcommerce ' );
+            return null;
+        }
+        List<Object> responselist;
+        try{
+            Map<integer, BC_Tax_Class__c> taxclasses=BCTaxClassSyncHandler.getTaxidVsname();
+            responselist = (List<Object>) JSON.deserializeUntyped(responseFromNet);
+            List<Object> orderitems=(List<Object>)responselist;
+            
+            for (Object orderobj : orderitems) {
+                Map<String, Object> orderMap = (Map<String, Object>) orderobj;
+                order theorder=new order();
+                populateOrderDetails(orderMap,theorder);       
+                List<OrderItem> orderitemlist=associateOrderProduct(ordermap,theOrder);
+                list<OrderItem> oilist=new list<OrderItem>();
+                insert theorder;
+                system.debug('orderid '+theOrder.id);
+                for(OrderItem item1:orderitemlist){
+                    item1.OrderId=theOrder.id;
+                    system.debug('printing order for orderitem '+theOrder.id);
+                    // orderitemlist.add(item1);
+                    system.debug('looping item '+item1);
+                    
+                }
+                system.debug('inserting order item list '+orderitemlist);
+                insert orderitemlist;   
+            }        
+        }
+        catch(Exception exc){
+            exc.getMessage();    
+            system.debug(exc.getStackTraceString());
+            throw exc;
+        }
+        return responselist;
+    }
+    
+    
+    
+    Private order populateOrderDetails (Map<string,object> orderMap,Order theOrder)
+    { 
+        string createdatestr=string.valueof(orderMap.get('date_created'));
+        theorder.BC_Created_Date__c=SObjectUtil.Dateconvertor(createdatestr);
+        string modifieddatestr=string.valueof(orderMap.get('date_modified'));
+        theorder.BC_ModifiedDate__c=SObjectUtil.Dateconvertor(modifieddatestr);
+        string shippedatestr=string.valueof(orderMap.get('date_shipped'));
+        /*if(shippedatestr!=null){
+            system.debug('shippedatestr '+shippedatestr);
+        theorder.BC_ShippedDate__c=SObjectUtil.Dateconvertor(shippedatestr);
+        }*/
+        
+        Map<String,Object> billingAddressMap=(Map<string,object>)orderMap.get('billing_address');
+        theorder.BillingCountry=(String) billingAddressMap.get('country');
+        theorder.BillingState=(String) billingAddressMap.get('state');
+        theorder.BillingCity=(String) billingAddressMap.get('city');         
+        theorder.BillingStreet=(String) billingAddressMap.get('street_1');            
+        theorder.BillingPostalCode=(string) billingAddressMap.get('zip'); 
+        theorder.BC_OrderId__c=(integer)orderMap.get('id');
+        theorder.BC_OrderStatus__c=(string)orderMap.get('status');
+        theorder.Items_Shipped__c=(integer)orderMap.get('items_shipped');
+        theorder.Items_Total__c=(integer)orderMap.get('items_total');
+        theorder.IP_Address__c=(string)orderMap.get('ip_address');
+        theorder.Order_Source__c=(string)orderMap.get('order_source');
+        theorder.Payment_Method__c=(String) orderMap.get('payment_method'); 
+       
+        theorder.EffectiveDate=system.today();        
+        theorder.Status='draft';
+        Pricebook2 stdpb=Sobjectutil.getStandardPriceBook();
+        theorder.Pricebook2Id=stdpb.id;
+        string totalExTax=(string)orderMap.get('total_ex_tax');
+        string totalIncTax=(string)orderMap.get('total_inc_tax');
+        string totalTax=(string)orderMap.get('total_tax');
+        
+        list<Object> shiplist=fetchShippingResponse(orderMap,theOrder);
+        List<Object> shipitems=(List<Object>)shiplist;
+        
+        for (Object shipobj : shipitems) {
+            Map<String, Object> shipMap = (Map<String, Object>) shipobj;
+            theorder.ShippingCountry=(string)shipMap.get('country');   
+            theorder.ShippingCity=(string)shipMap.get('city');
+            theorder.ShippingState=(string)shipMap.get('state');   
+            theorder.ShippingStreet=(string)shipMap.get('street_1');
+            theorder.ShippingPostalCode=(string)shipMap.get('zip');   
+            
+        }
+        return theorder;   
+    }
+    
+    private List<OrderItem> associateOrderProduct(Map<string,object> ordermap,Order theOrder)
+    {
+        list<object> prodlist=fetchProductResponse(orderMap,theOrder);
+        system.debug('response from fetchProductResponse '+prodlist);
+        List<OrderItem> orderitemlist=new List<OrderItem>();
+        for (Object prodobj : prodlist) {
+            Map<String, Object> prodMap = (Map<String, Object>) prodobj;
+            system.debug('productmap '+prodMap);
+            
+            integer orderid=(integer)prodMap.get('order_id');
+            integer orderproductid=(integer)prodMap.get('id');
+            integer ProdQuantity=(integer)prodMap.get('quantity');
+            integer prodid=(integer)prodMap.get('product_id');
+            OrderItem item=new OrderItem();
+            list<Product2> prlist;
+            Product2 prod;
+            system.debug('product id to query '+prodid);
+            prlist=[select id,name,BC_Price__c from product2 where BC_ProductId__c=:prodid];
+            if(prlist!=null && prlist.size()>0){
+                prod=prlist.get(0);
+             item.Product2Id=prod.id;    
+            }
+            else{
+                BCProductSyncHandler bcprod=new BCProductSyncHandler();
+                prod=bcprod.createProduct(prodid);
+                item.Product2Id=prod.id;
+            }
+            pricebookentry price=[select id,name from pricebookentry where Product2Id=:prod.id];
+            
+            
+            item.UnitPrice=prod.BC_Price__c;
+            item.PricebookEntryId=price.id;
+            item.Quantity=ProdQuantity; 
+            item.Description='new';
+            item.BC_OrderProductId__c=orderproductid;
+            
+            item.EndDate=date.newinstance(2020, 10, 17);
+            orderitemlist.add(item);
+        }    
+        if(orderitemlist.size() > 0)
+        {
+            System.debug('Associate orderProduct size ' + orderitemlist.size());
+            return orderitemlist;
+        }
+        else{
+            System.debug('unable to associate orderProduct for order');
+            return null;
+        }
+    }
+    
+    private list<Object> fetchProductResponse(Map<string,object> ordermap,Order theOrder)
+    {
+        Map<string,object> productMap=(Map<string,object>)ordermap.get('products');
+        string url=(string)productMap.get('url');
+        string resource=(string)productMap.get('resource');
+        integer orderid=(integer)orderMap.get('id');
+        System.debug('Fetching product data for bcorderid '+orderid);
+        list<Object> prodlist=new list<Object>();
+        map<string,string> metamap=BCStoreUtil.getStoreAPICredentials();
+        string clientid=metamap.get('clientid');
+        string accesstoken=metamap.get('clienttoken');
+        string bcgroupurl=url;
+        string action='GET';
+        HttpRequest reqData = new HttpRequest();
+        Http http = new Http();
+        reqData.setHeader('X-Auth-Client', clientid);
+        reqData.setHeader('X-Auth-Token', accesstoken);
+        reqData.setHeader('Accept', 'application/json');
+        reqData.setHeader('Content-Type', 'application/json');
+        reqData.setHeader('Connection','keep-alive');
+        reqData.setTimeout(20000); 
+        reqData.setEndpoint(bcgroupurl);                                      
+        reqData.setMethod(action);        
+        String responseFromNet;  
+        HTTPResponse res = http.send(reqData);
+        responseFromNet = res.getBody();
+        System.debug('Response from Bigcommerce for OrderProduct ' + responseFromNet);
+        if(res.getStatusCode() != 200)
+        {
+            System.debug('Unable to fetch orderProduct data from Bigcommerce ' );
+            return null;
+        }
+        list<Object> responselist;
+        try{
+            responselist = (list<Object>) JSON.deserializeUntyped(responseFromNet);            
+        }catch(Exception exc){
+            exc.getStackTraceString();
+        }
+        return responselist;        
+    }
+    
+    
+    
+    private list<Object> fetchShippingResponse(Map<string,object> ordermap,Order theOrder)
+    {
+        Map<string,object> shippingMap=(Map<string,object>)ordermap.get('shipping_addresses');
+        string url=(string)shippingMap.get('url');
+        string resource=(string)shippingMap.get('resource');
+        integer orderid=(integer)orderMap.get('id');
+        
+        list<Object> prodlist=new list<Object>();
+        map<string,string> metamap=BCStoreUtil.getStoreAPICredentials();
+        string clientid=metamap.get('clientid');
+        string accesstoken=metamap.get('clienttoken');
+        string bcgroupurl=url;
+        string action='GET';
+        HttpRequest reqData = new HttpRequest();
+        Http http = new Http();
+        reqData.setHeader('X-Auth-Client', clientid);
+        reqData.setHeader('X-Auth-Token', accesstoken);
+        reqData.setHeader('Accept', 'application/json');
+        reqData.setHeader('Content-Type', 'application/json');
+        reqData.setHeader('Connection','keep-alive');
+        reqData.setTimeout(20000); 
+        reqData.setEndpoint(bcgroupurl);                                      
+        reqData.setMethod(action);        
+        String responseFromNet;  
+        HTTPResponse res = http.send(reqData);
+        responseFromNet = res.getBody();
+        System.debug('Response from Bigcommerce for Ordershipping ' + responseFromNet);
+        if(res.getStatusCode() != 200)
+        {
+            System.debug('Unable to fetch ordershipping data from Bigcommerce ' );
+            return null;
+        }
+        list<Object> responselist;
+        try{
+            responselist = (list<Object>) JSON.deserializeUntyped(responseFromNet);            
+        }catch(Exception exc){
+            exc.getStackTraceString();
+        }
+        return responselist;        
+    }
+    
+    
+    
+    public Map<string,Object> fetchOrderResponse(integer bcorderid)
+    {   
+        
+        map<string,string> metamap=BCStoreUtil.getStoreAPICredentials();
+        string clientid=metamap.get('clientid');
+        string accesstoken=metamap.get('clienttoken');
+        string bcgroupurl=metamap.get('bcurl');
+        bcgroupurl=bcgroupurl+'/v2/orders/'+bcorderid;
+        string action='GET';
+        HttpRequest reqData = new HttpRequest();
+        Http http = new Http();
+        reqData.setHeader('X-Auth-Client', clientid);
+        reqData.setHeader('X-Auth-Token', accesstoken);
+        reqData.setHeader('Accept', 'application/json');
+        reqData.setHeader('Content-Type', 'application/json');
+        reqData.setHeader('Connection','keep-alive');
+        reqData.setTimeout(20000); 
+        reqData.setEndpoint(bcgroupurl);                                      
+        reqData.setMethod(action);        
+        String responseFromNet;  
+        HTTPResponse res = http.send(reqData);
+        responseFromNet = res.getBody();
+        System.debug('Response from Bigcommerce for Order ' + responseFromNet);
+        if(res.getStatusCode() != 200)
+        {
+            System.debug('Unable to fetch Order data from Bigcommerce ' );
+            return null;
+        }
+        Map<string,Object> responsemap;
+        try{
+            Map<integer, BC_Tax_Class__c> taxclasses=BCTaxClassSyncHandler.getTaxidVsname();
+            responsemap = (Map<string,Object>) JSON.deserializeUntyped(responseFromNet);
+        }
+        catch(Exception exc){
+            exc.getMessage();    
+            system.debug(exc.getStackTraceString());
+            throw exc;
+        }
+        return responsemap;
+    }
+    
+    
+    
+    public Map<string,Object> fetchOrderStatus(integer bcStatusid)
+    {   
+        
+        map<string,string> metamap=BCStoreUtil.getStoreAPICredentials();
+        string clientid=metamap.get('clientid');
+        string accesstoken=metamap.get('clienttoken');
+        string bcgroupurl=metamap.get('bcurl');
+        bcgroupurl=bcgroupurl+'/v2/order_statuses/'+bcStatusid;
+        string action='GET';
+        HttpRequest reqData = new HttpRequest();
+        Http http = new Http();
+        reqData.setHeader('X-Auth-Client', clientid);
+        reqData.setHeader('X-Auth-Token', accesstoken);
+        reqData.setHeader('Accept', 'application/json');
+        reqData.setHeader('Content-Type', 'application/json');
+        reqData.setHeader('Connection','keep-alive');
+        reqData.setTimeout(20000); 
+        reqData.setEndpoint(bcgroupurl);                                      
+        reqData.setMethod(action);        
+        String responseFromNet;  
+        HTTPResponse res = http.send(reqData);
+        responseFromNet = res.getBody();
+        System.debug('Response from Bigcommerce for Order ' + responseFromNet);
+        if(res.getStatusCode() != 200)
+        {
+            System.debug('Unable to fetch Order data from Bigcommerce ' );
+            return null;
+        }
+        Map<string,Object> responsemap;
+        try{
+            Map<integer, BC_Tax_Class__c> taxclasses=BCTaxClassSyncHandler.getTaxidVsname();
+            responsemap = (Map<string,Object>) JSON.deserializeUntyped(responseFromNet);
+        }
+        catch(Exception exc){
+            exc.getMessage();    
+            system.debug(exc.getStackTraceString());
+            throw exc;
+        }
+        return responsemap;
+    }
+    
+    
+    public void createOrder(integer bcorderid)
+    {
+        Map<string,object> orderMap=fetchOrderResponse(bcorderid); 
+        order theorder=new order();
+        populateOrderDetails(orderMap,theorder);       
+        List<OrderItem> orderitemlist=associateOrderProduct(ordermap,theOrder);
+        list<OrderItem> oilist=new list<OrderItem>();
+         integer customerid=(integer)orderMap.get('customer_id');
+        list<Account> acclist;
+        account acc;
+        acclist=[select id from Account where BC_CustomerId__c=:customerid];
+        if(acclist!=null && acclist.size()>0){
+        acc =acclist.get(0);   
+        theorder.AccountId=acc.id;
+        }
+        else{
+         BCCustomerSyncHandler bc=new BCCustomerSyncHandler();
+         acc= bc.fetchBCCustomer(customerid);
+            theorder.AccountId=acc.id;
+        }
+        insert theorder;
+        system.debug('orderid '+theOrder.id);
+        for(OrderItem item:orderitemlist){
+            /* integer prodid=(integer)prodMap.get('product_id');
+            Product2 prod;
+            system.debug('product id to query '+prodid);
+            prod=[select id,name,BC_Price__c from product2 where BC_ProductId__c=:prodid];
+            if(prod!=null){
+             item.Product2Id=prod.id;    
+            }
+            else{
+                BCProductSyncHandler bcprod=new BCProductSyncHandler();
+                prod=bcprod.createProduct(prodid);
+                item.Product2Id=prod.id;
+            }
+            pricebookentry price=[select id,name from pricebookentry where Product2Id=:prod.id];
+            
+            
+            item.UnitPrice=prod.BC_Price__c;
+            item.PricebookEntryId=price.id;*/
+            item.OrderId=theOrder.id;
+            system.debug('printing order for orderitem '+theOrder.id);
+            system.debug('looping item '+item);
+            
+        }
+        system.debug('inserting order item list '+orderitemlist);
+        insert orderitemlist;   
+    } 
+    
+    
+    public void updateSFOrder(integer bcOrderid)
+    {
+        Map<string,object> orderMap=fetchOrderResponse(bcOrderid);
+        List<Order> sfOrderlist=[select Id from Order where BC_OrderId__c=:bcOrderid];
+        system.debug('sfOrderlist '+sfOrderlist);
+        if(sfOrderlist.size() > 0)
+        {
+            Order sfOrder=sfOrderlist.get(0);
+            populateOrderDetails(orderMap,sfOrder); 
+            List<OrderItem> sfitemlist=[select id from OrderItem where OrderId=:sfOrder.id];
+            List<OrderItem> orderitemlist=associateOrderProduct(ordermap,sfOrder);
+            
+            update sfOrder;
+            system.debug('orderid '+sfOrder.id);
+            Map<Decimal, OrderItem> objMap2 = new Map<Decimal, OrderItem>();
+            for(OrderItem o : orderitemlist)
+            {
+                objMap2.put(o.BC_OrderProductId__c, o);
+            }
+            List<OrderItem> sfitemlist1=[select id,OrderId from OrderItem where BC_OrderProductId__c IN:objMap2.keyset()];
+            delete sfitemlist1;
+            for(OrderItem item1:orderitemlist){
+                item1.OrderId=sfOrder.id;
+                system.debug('printing order for orderitem '+sfOrder.id);
+                system.debug('looping item '+item1);
+                
+            }
+            system.debug('inserting order item list '+orderitemlist);
+            insert orderitemlist;   
+        } 
+        else{
+            System.debug(' Order not found in salesforce ' + bcOrderid);
+        }        
+    }
+    
+    
+    
+    public void updateOrderStatus(integer bcorderid,integer bcStatusid)
+    {
+        Map<string,object> orderMap=fetchOrderStatus(bcStatusid);
+        order bcorder=[select id,BC_OrderStatus__c from order where BC_OrderId__c=:bcorderid];
+        bcorder.BC_OrderStatus__c=(string)orderMap.get('name');
+        update bcorder;
+        
+    }
+    
+    
+}
